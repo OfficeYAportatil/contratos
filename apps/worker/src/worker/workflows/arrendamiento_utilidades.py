@@ -9,6 +9,7 @@ import base64
 import csv
 import datetime
 import io
+import json
 import re
 import unicodedata
 import zipfile
@@ -124,6 +125,53 @@ def celda(texto: str) -> str:
     """Una celda de la representacion textual de la hoja: vacia cuando la hoja dice ``nan`` o similar."""
     limpio = (texto or "").strip()
     return "" if limpio.lower() in VACIAS else limpio
+
+
+_ESCAPES_JSON = re.compile(r"\\u([0-9a-fA-F]{4})|\\n|\\r|\\t|\\\\|\\\"")
+
+
+def _decodifica_escape(coincidencia: re.Match[str]) -> str:
+    if coincidencia.group(1):
+        return chr(int(coincidencia.group(1), 16))
+    return {"\\n": "\n", "\\r": "\r", "\\t": "\t", "\\\\": "\\", "\\\"": '"'}[
+        coincidencia.group(0)
+    ]
+
+
+def desenvuelve_texto(texto: str) -> str:
+    """Quita la envoltura JSON del resultado de un conector y deja el texto plano.
+
+    ``read_file_content`` del conector de Drive llego observada como ``{"file_content":
+    "Sheet: ..."}`` (a veces doblemente envuelta) con los renglones escapados; se desenrolla
+    tantas veces como se pueda y, si el texto no trae renglones reales, decodifica los escapes
+    ``\\n`` y ``\\uXXXX`` para que ``separa_hojas`` reciba renglones verdaderos.
+    """
+    actual = texto
+    for _ in range(4):
+        recorte = actual.strip()
+        if not (recorte.startswith("{") or recorte.startswith('"')):
+            break
+        try:
+            decodificado = json.loads(recorte)
+        except json.JSONDecodeError:
+            break
+        if isinstance(decodificado, str):
+            actual = decodificado
+        elif isinstance(decodificado, dict):
+            valor = None
+            for clave in ("file_content", "content", "text", "body"):
+                candidato = decodificado.get(clave)
+                if isinstance(candidato, str):
+                    valor = candidato
+                    break
+            if valor is None:
+                break
+            actual = valor
+        else:
+            break
+    if "\n" not in actual and "\\n" in actual:
+        actual = _ESCAPES_JSON.sub(_decodifica_escape, actual)
+    return actual
 
 
 def separa_hojas(texto_hoja: str) -> dict[str, list[list[str]]]:

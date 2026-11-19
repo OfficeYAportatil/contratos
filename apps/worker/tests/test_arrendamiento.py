@@ -2,7 +2,9 @@
 
 import base64
 import io
+import json
 import zipfile
+from pathlib import Path
 
 from worker.workflows import arrendamiento_utilidades as util
 from worker.workflows.arrendamiento import elegir_plantilla, texto_de_resultado
@@ -169,3 +171,80 @@ class TestPlantillas:
         elegida = elegir_plantilla(plantillas, "Nave")
         assert elegida is not None
         assert elegir_plantilla([], "Casa") is None
+
+
+class TestDesenvuelve:
+    ENCUESTE = '{"file_content": "Sheet: Presets\\nInmueble,Tipo\\nCasa,Habitacional\\n"}'
+
+    def test_json_simple(self) -> None:
+        texto = util.desenvuelve_texto(json.dumps({"file_content": "Sheet: Presets\nInmueble,Tipo\nCasa,Habitacional\n"}))
+        hojas = util.separa_hojas(texto)
+        assert hojas["Presets"] == [["Inmueble", "Tipo"], ["Casa", "Habitacional"]]
+
+    def test_json_doble(self) -> None:
+        interno = json.dumps({"file_content": "Sheet: DatosRenda\nArrendador\nRenda\n"})
+        texto = util.desenvuelve_texto('{"content": ' + json.dumps(interno) + '}')
+        hojas = util.separa_hojas(texto)
+        assert hojas["DatosRenda"][1][0] == "Renda"
+
+    def test_hoja_json(self) -> None:
+        texto = util.desenvuelve_texto(self.ENCUESTE)
+        hojas = util.separa_hojas(texto)
+        assert hojas["Presets"][0] == ["Inmueble", "Tipo"]
+
+    def test_escapes_sin_json(self) -> None:
+        crudo = "Sheet: Presets\\nInmueble,Tipo\\nCaf\\u00e9,1\\n"
+        hojas = util.separa_hojas(util.desenvuelve_texto(crudo))
+        assert hojas["Presets"] == [["Inmueble", "Tipo"], ["Café", "1"]]
+
+    def test_texto_plano_intacto(self) -> None:
+        assert util.desenvuelve_texto("Sheet: Presets\nA,B\n") == "Sheet: Presets\nA,B\n"
+
+
+class TestInventarioReal:
+    def _texto_envuelto(self) -> str:
+        ruta = Path(__file__).parent / "fixtures" / "base_datos_real.txt"
+        return json.dumps({"file_content": json.dumps({"file_content": ruta.read_text(encoding="utf-8")})})
+
+    def _inventario(self) -> dict[str, list[list[str]]]:
+        return util.separa_hojas(util.desenvuelve_texto(self._texto_envuelto()))
+
+    def test_hojas_reales(self) -> None:
+        hojas = self._inventario()
+        assert set(hojas) == {"Presets", "DatosRenda", "PLANTILLAS", "Document Studio Logs"}
+
+    def test_inmueble_por_preciosas(self) -> None:
+        hojas = self._inventario()
+        registros = util.hoja_a_registros(hojas, "Presets")
+        fila = util.busca_inmueble(registros, "Av. Bosque Gomero")
+        assert fila["Tipo de Inmueble"] == "Casa"
+        assert fila["Uso de Suelo"] == "Habitacional"
+
+    def test_arrendador_real(self) -> None:
+        hojas = self._inventario()
+        contratos = util.hoja_a_registros(hojas, "DatosRenda")
+        fila = util.busca_arrendador(contratos, "Bahía #515")
+        assert fila["Arrendador"] == "Inmobiliaria Rusticana de León Guanajuato S.A. de C.V."
+        assert fila["RFC Arrendador"] == "IRL880211R23"
+        assert fila["Inmueble en garantía cuenta catastarl"] == "6-52-29-70-0"
+
+    def test_derivados_reales(self) -> None:
+        hojas = self._inventario()
+        contratos = util.hoja_a_registros(hojas, "DatosRenda")
+        fila = util.busca_arrendador(contratos, "Bahía #515")
+        derivados = util.calcula_derivados(fila)
+        assert derivados["Día de pago mensual"] == "1"
+        assert derivados["Texto día de pago mensual"] == "UN"
+        assert derivados["Fecha Firma"] == "1 de febrero de 2025"
+        assert derivados["Texto renta mensual bruta"].endswith("PESOS 11/100 M.N.")
+
+    def test_plantilla_habitacional_real(self) -> None:
+        hojas = self._inventario()
+        plantillas = util.hoja_a_registros(hojas, "PLANTILLAS")
+        elegida = elegir_plantilla(plantillas, "Casa")
+        assert elegida is not None
+        assert elegida["documento_id"] == "1bN7cFZgPkNvkKU_5K5BVL7DPTKljRi7Jdivd-wqF2JM"
+        assert "habitacional" in elegida["nombre"].lower()
+        elegida = elegir_plantilla(plantillas, "Bodega")
+        assert elegida is not None
+        assert elegida["documento_id"] == "1CIi0NsevDCiQAJbYXkHKjtxH_FiWkBq5BscoVVbzgpQ"

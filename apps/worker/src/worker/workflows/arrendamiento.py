@@ -130,9 +130,19 @@ def elegir_plantilla(plantillas: list[dict[str, str]], tipo_inmueble: str) -> di
         nombre_plantilla = next(
             (valor for clave, valor in registro.items() if "arrendamiento" in util.normaliza(clave)),
             "",
+        ) or next(
+            (str(valor) for valor in registro.values() if "arrendamiento" in util.normaliza(str(valor))),
+            "",
         )
         llave = nombre_plantilla if nombre_plantilla else " ".join(str(valor) for valor in registro.values())
-        documento = next((str(valor) for valor in registro.values() if re.fullmatch(r"[\w-]{20,}", str(valor))), "")
+        documento = next(
+            (
+                str(valor)
+                for valor in registro.values()
+                if re.fullmatch(r"[\w-]{25,}", str(valor)) and valor != nombre_plantilla
+            ),
+            "",
+        )
         if not documento:
             continue
         candidata = {"nombre": nombre_plantilla or deseada, "documento_id": documento}
@@ -174,7 +184,7 @@ def ejecuta_json(texto: str) -> list[dict[str, Any]]:
 async def cargar_inventario(spreadsheet_id: str, client: ToolCallClient = Depends(google_drive)) -> dict[str, Any]:
     """La base de datos completa como registros: inmuebles, contratos anteriores y plantillas."""
     resultado = await client.call_tool("read_file_content", {"file_id": spreadsheet_id})
-    hojas = util.separa_hojas(texto_de_resultado(resultado))
+    hojas = util.separa_hojas(util.desenvuelve_texto(texto_de_resultado(resultado)))
     nombre_inmuebles = busca_hoja(hojas, HOJA_INMUEBLES)
     nombre_contratos = busca_hoja(hojas, HOJA_CONTRATOS)
     nombre_plantillas = busca_hoja(hojas, HOJA_PLANTILLAS)
