@@ -1,0 +1,126 @@
+{
+  "name": "Contratos de arrendamiento (equiv. n8n del flujo Mistral)",
+  "nodes": [
+    {
+      "parameters": { "content": "## 1. Alta del proceso\nGerencia llama al webhook con inmueble y email del inquilino. El portal Mistral (`/api/gerencia`) puede llamarlo, o hacerlo a mano desde n8n.", "height": 160, "width": 300 },
+      "id": "nota-alta", "name": "Nota alta", "type": "n8n-nodes-base.stickyNote", "typeVersion": 1, "position": [-420, -200]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST", "path": "contratos/nuevo-proceso", "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "wh-nuevo", "name": "Webhook nuevo proceso", "type": "n8n-nodes-base.webhook", "typeVersion": 2, "position": [-80, 0], "webhookId": "contratos-nuevo-proceso"
+    },
+    {
+      "parameters": {
+        "documentId": { "__rl": true, "mode": "list", "value": "1jda5Z9-Uu07KXj-ZUwiARUV5xmXGnbt0D8E57EJVzLI" },
+        "sheetName": { "__rl": true, "mode": "list", "value": "Presets" },
+        "options": {}
+      },
+      "id": "gs-inmuebles", "name": "Leer Presets", "type": "n8n-nodes-base.googleSheets", "typeVersion": 4.5, "position": [160, 0], "alwaysOutputData": true
+    },
+    {
+      "parameters": { "jsCode": "// Busca el inmueble (exacto o por contencion) y arma el registro base\nconst referencia = ($json.body?.inmueble || '').trim();\nconst filas = $input.all().map(i => i.json);\nconst norm = (t) => String(t ?? '').toLowerCase().normalize('NFKD').replace(/\\p{Diacritic}/gu, '');\nconst ref = norm(referencia);\nconst fila = filas.find(f =>\n  Object.values(f).some(v => norm(v) === ref)\n) || filas.find(f =>\n  Object.values(f).some(v => { const nv = norm(v); return nv && (nv.includes(ref) || ref.includes(nv)); })\n) || {};\nreturn [{ json: { inmueble: fila, email_inquilino: $json.body?.email_inquilino || '', process_id: crypto.randomUUID?.() || $execution.id } }];" },
+      "id": "cod-busca", "name": "Buscar inmueble", "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [380, 0]
+    },
+    {
+      "parameters": {
+        "documentId": { "__rl": true, "mode": "list", "value": "1jda5Z9-Uu07KXj-ZUwiARUV5xmXGnbt0D8E57EJVzLI" },
+        "sheetName": { "__rl": true, "mode": "list", "value": "DatosRenda" },
+        "options": {}
+      },
+      "id": "gs-renda", "name": "Leer DatosRenda", "type": "n8n-nodes-base.googleSheets", "typeVersion": 4.5, "position": [380, -180], "alwaysOutputData": true
+    },
+    {
+      "parameters": { "jsCode": "// Prefila del arrendador con la ultima fila del mismo inmueble y derivados calculados\nconst fila = $json.inmueble || {};\nconst dir = Object.values(fila).find(v => /col\\./i.test(String(v))) || '';\nconst contratos = $('Leer DatosRenda').all().map(i => i.json)\n  .filter(c => String(c['Inmueble en arrendamiento'] || '').toLowerCase().includes(String(fila['Inmuebles en arrendamiento'] || dir).toLowerCase()));\nconst arrendador = contratos[contratos.length - 1] || {};\n\nconst dec = (t) => { const n = parseFloat(String(t ?? '').replace(/[^0-9.]/g, '')); return isNaN(n) ? null : n; };\nconst letras = (n) => new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(n);\nconst renta = dec(arrendador['Renta mensual bruta']);\nconst dcto = dec(arrendador['Descuento PP']) || 0;\nconst fecha = arrendador['Fecha Firma'] ? new Date(arrendador['Fecha Firma']) : null;\nconst fleg = fecha ? fecha.toLocaleDateString('es-MX', { day: 'numeric', month: 'long', year: 'numeric' }) : '';\n\nconst derivados = renta === null ? {} : {\n  'Texto renta mensual bruta': letras(renta),\n  'Valor del periodo': letras(renta * 12),\n  'Descuento PP': letras(dcto),\n  'Total con dcto pp': letras(renta - dcto)\n};\nif (fecha && !isNaN(fecha)) {\n  derivados['Fecha Firma'] = fleg;\n  derivados['D\\u00eda de pago mensual'] = String(fecha.getDate());\n  derivados['A\\u00f1o firma texto'] = String(fecha.getFullYear());\n}\nreturn [{ json: { arrendador, derivados, proceso: { inmueble: fila, email_inquilino: $json.email_inquilino, process_id: $json.process_id } } }];" },
+      "id": "cod-arrendador", "name": "Arrendador + derivados", "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [600, 0]
+    },
+    {
+      "parameters": { "content": "## 2. Documentaci\u00f3n del inquilino\nGmail busca los correos del inquilino; la extracci\u00f3n LLM con evidencia y el informe a gerencia ocurren igual que en el workflow Mistral.", "height": 150, "width": 300 },
+      "id": "nota-docs", "name": "Nota docs", "type": "n8n-nodes-base.stickyNote", "typeVersion": 1, "position": [820, -200]
+    },
+    {
+      "parameters": {
+        "operation": "getAll", "returnAll": true,
+        "filters": { "q": "=from:{{ $json.proceso.email_inquilino }} has:attachment" },
+        "options": { "query": "=from:{{ $json.proceso.email_inquilino }}" }
+      },
+      "id": "gm-hilos", "name": "Correos del inquilino", "type": "n8n-nodes-base.gmail", "typeVersion": 2.1, "position": [820, 0]
+    },
+    {
+      "parameters": { "jsCode": "// Yo (n8n) no(extrae con LLM: sustituye por un nodo OpenAI / Mistral / Gemini.\n// Entrada: correos del inquilino. Salida: [{campo, valor, evidencia}] contra el catalogo de campos.\nconst correos = $input.all().map(i => i.json);\nreturn [{ json: { documentos: correos.map(c => ({ de: c.from, asunto: c.subject, fecha: c.date, adjuntos: (c.attachments || []).length })) , extraido: [] } }];" },
+      "id": "cod-extract", "name": "LLM extrae campos (sustituir por nodo IA)", "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [1040, 0]
+    },
+    {
+      "parameters": { "sendTo": ["dynamisdenarii@gmail.com"], "subject": "=Revisi\u00f3n de contrato - {{ $('Buscar inmueble').item.json.proceso }}", "message": "=Hay una captura lista para revisar. Documentos recibidos: {{ $json.documentos.length }}. Abre el panel de gerencia.", "options": {} },
+      "id": "gm-informe", "name": "Correo a gerencia", "type": "n8n-nodes-base.gmail", "typeVersion": 2.1, "position": [1260, 0]
+    },
+    {
+      "parameters": { "content": "## 3. Espera y decisi\u00f3n de gerencia\nEl portal guarda la captura; los webhooks marcan 'inquilino completo' y 'aprobado'. Nota: esto reimplementa el flujo; el wait durable y el autoguardado multi-ses\\u00f3n son del portal Mistral o requiren polling.", "height": 170, "width": 320 },
+      "id": "nota-espera", "name": "Nota espera", "type": "n8n-nodes-base.stickyNote", "typeVersion": 1, "position": [1480, -220]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST", "path": "contratos/aprobado", "responseMode": "lastNode", "options": {}
+      },
+      "id": "wh-aprobado", "name": "Webhook aprobado", "type": "n8n-nodes-base.webhook", "typeVersion": 2, "position": [1480, 0], "webhookId": "contratos-aprobado"
+    },
+    {
+      "parameters": { "conditions": { "options": { "caseSensitive": true, "version": 2 }, "conditions": [{ "leftValue": "={{ $json.body?.aprobado }}", "rightValue": true, "operator": { "type": "boolean", "operation": "true", "singleValue": true } }], "combinator": "and" }, "options": {} },
+      "id": "if-aprobado", "name": "\u00bfAprobado?", "type": "n8n-nodes-base.if", "typeVersion": 2, "position": [1700, 0]
+    },
+    {
+      "parameters": { "content": "## 4. Generaci\u00f3n del contrato\nDescarga la plantilla docx, llena {{tokens}} (nombre del archivo = \u00abInquilino\u00bb - ArrendamientoHabitacional|Comercial), sube a la carpeta de contratos (187lKT8g\u2026), exporta PDF y avisa a gerencia.", "height": 180, "width": 340 },
+      "id": "nota-gen", "name": "Nota generacion", "type": "n8n-nodes-base.stickyNote", "typeVersion": 1, "position": [1920, -220]
+    },
+    {
+      "parameters": {
+        "operation": "download", "fileId": { "__rl": true, "mode": "id", "value": "={{ $('Arrendador + derivados').item.json.proceso.inmueble['Tipo de Inmueble'] && /casa|departamento|apartamento|cuarto/i.test($('Arrendador + derivados').item.json.proceso.inmueble['Tipo de Inmueble']) ? '1bN7cFZgPkNvkKU_5K5BVL7DPTKljRi7Jdivd-wqF2JM' : '1CIi0NsevDCiQAJbYXkHKjtxH_FiWkBq5BscoVVbzgpQ' }}" },
+        "options": { "googleFileConversion": { "docsToFormat": "application/vnd.openxmlformats-officedocument.wordprocessingml.document" } }
+      },
+      "id": "gd-plantilla", "name": "Descargar plantilla docx", "type": "n8n-nodes-base.googleDrive", "typeVersion": 3, "position": [1920, 0]
+    },
+    {
+      "parameters": { "jsCode": "// Llenado de {{tokens}} sobre document.xml (zip in-memory; n8n Code no trae papa zip nativa:\n// usa el nodo Google Docs 'create document from template' o tu propia librer\u00eda de zip con addons).\n// Aqu\u00ed solo demuestra el contrato de datos.\nconst { arrendador, derivados, proceso } = $input.item.json;\nconst valores = { ...arrendador, ...derivados, ...{} };\nreturn [{ json: { valores, titulo: `${proceso.inmueble['Arrendatario nuevo'] || proceso.email_inquilino} - Arrendamiento`, carpeta_id: '187lKT8g582TR20MLvGtG0jodpIcBg3kp' } }];" },
+      "id": "cod-docx", "name": "Llenar {{tokens}}", "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [2140, 0]
+    },
+    {
+      "parameters": {
+        "name": "={{ $json.titulo }}", "driveId": { "__rl": true, "mode": "list", "value": "My Drive" },
+        "folderId": { "__rl": true, "mode": "id", "value": "187lKT8g582TR20MLvGtG0jodpIcBg3kp" },
+        "inputDataFieldName": "data"
+      },
+      "id": "gd-subir", "name": "Subir contrato a Drive", "type": "n8n-nodes-base.googleDrive", "typeVersion": 3, "position": [2360, 0]
+    },
+    {
+      "parameters": { "sendTo": ["dynamisdenarii@gmail.com"], "subject": "Contrato generado", "message": "El contrato queda en la carpeta de contratos de Drive.", "options": {} },
+      "id": "gm-aviso", "name": "Correo con contrato", "type": "n8n-nodes-base.gmail", "typeVersion": 2.1, "position": [2580, 0]
+    }
+  ],
+  "connections": {
+    "Webhook nuevo proceso": { "main": [[{ "node": "Leer Presets", "type": "main", "index": 0 }]] },
+    "Leer Presets": { "main": [[{ "node": "Buscar inmueble", "type": "main", "index": 0 }]] },
+    "Buscar inmueble": { "main": [[{ "node": "Arrendador + derivados", "type": "main", "index": 0 }]] },
+    "Leer DatosRenda": { "main": [] },
+    "Arrendador + derivados": { "main": [[{ "node": "Correos del inquilino", "type": "main", "index": 0 }]] },
+    "Correos del inquilino": { "main": [[{ "node": "LLM extrae campos (sustituir por nodo IA)", "type": "main", "index": 0 }]] },
+    "LLM extrae campos (sustituir por nodo IA)": { "main": [[{ "node": "Correo a gerencia", "type": "main", "index": 0 }]] },
+    "Correo a gerencia": { "main": [[{ "node": "Webhook aprobado", "type": "main", "index": 0 }]] },
+    "Webhook aprobado": { "main": [[{ "node": "\u00bfAprobado?", "type": "main", "index": 0 }]] },
+    "\u00bfAprobado?": {
+      "main": [
+        [{ "node": "Descargar plantilla docx", "type": "main", "index": 0 }],
+        [{ "node": "Correo a gerencia", "type": "main", "index": 0 }]
+      ]
+    },
+    "Descargar plantilla docx": { "main": [[{ "node": "Llenar {{tokens}}", "type": "main", "index": 0 }]] },
+    "Llenar {{tokens}}": { "main": [[{ "node": "Subir contrato a Drive", "type": "main", "index": 0 }]] },
+    "Subir contrato a Drive": { "main": [[{ "node": "Correo con contrato", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "pinData": {},
+  "meta": { "templateCredsSetupCompleted": false },
+  "tags": ["contratos", "arrendamiento"]
+}
